@@ -1,0 +1,627 @@
+//go:build linux
+// +build linux
+
+package netlink
+
+import (
+	"flag"
+	"fmt"
+	"math/rand"
+	"net"
+	"os"
+	"strconv"
+	"strings"
+	"syscall"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+
+	"github.com/iniwex5/netlink/nl"
+)
+
+func TestDevLinkGetDeviceList(t *testing.T) {
+	minKernelRequired(t, 4, 12)
+	t.Cleanup(setUpNetlinkTestWithKModule(t, "devlink"))
+	_, err := DevLinkGetDeviceList()
+	assert.NoError(t, err)
+}
+
+func TestDevLinkGetDeviceByName(t *testing.T) {
+	minKernelRequired(t, 4, 12)
+	t.Cleanup(setUpNetlinkTestWithKModule(t, "devlink"))
+	_, err := DevLinkGetDeviceByName("foo", "bar")
+	assert.NoError(t, err)
+}
+
+func TestDevLinkSetEswitchMode(t *testing.T) {
+	minKernelRequired(t, 4, 12)
+	t.Cleanup(setUpNetlinkTestWithKModule(t, "devlink"))
+	dev, err := DevLinkGetDeviceByName("foo", "bar")
+	assert.NoError(t, err)
+
+	err = DevLinkSetEswitchMode(dev, "switchdev")
+	assert.NoError(t, err)
+
+	err = DevLinkSetEswitchMode(dev, "legacy")
+	assert.NoError(t, err)
+}
+
+func logPort(t *testing.T, port *DevlinkPort) {
+	type field struct {
+		key   string
+		value string
+	}
+
+	fields := []field{}
+
+	fields = append(fields, field{key: "bus", value: port.BusName})
+	fields = append(fields, field{key: "device", value: port.DeviceName})
+	fields = append(fields, field{key: "port_index", value: strconv.Itoa(int(port.PortIndex))})
+	fields = append(fields, field{key: "port_type", value: strconv.Itoa(int(port.PortType))})
+	fields = append(fields, field{key: "port_flavour", value: strconv.Itoa(int(port.PortFlavour))})
+	fields = append(fields, field{key: "netdev_name", value: port.NetdeviceName})
+	fields = append(fields, field{key: "netdev_index", value: strconv.Itoa(int(port.NetdevIfIndex))})
+	fields = append(fields, field{key: "rdma_dev_name", value: port.RdmaDeviceName})
+
+	if port.Fn != nil {
+		fields = append(fields, field{key: "hw_addr", value: port.Fn.HwAddr.String()})
+		fields = append(fields, field{key: "state", value: strconv.Itoa(int(port.Fn.State))})
+		fields = append(fields, field{key: "op_state", value: strconv.Itoa(int(port.Fn.OpState))})
+	}
+
+	if port.PortNumber != nil {
+		fields = append(fields, field{key: "port_number", value: strconv.Itoa(int(*port.PortNumber))})
+	}
+
+	if port.PfNumber != nil {
+		fields = append(fields, field{key: "pf_number", value: strconv.Itoa(int(*port.PfNumber))})
+	}
+
+	if port.VfNumber != nil {
+		fields = append(fields, field{key: "vf_number", value: strconv.Itoa(int(*port.VfNumber))})
+	}
+
+	if port.SfNumber != nil {
+		fields = append(fields, field{key: "sf_number", value: strconv.Itoa(int(*port.SfNumber))})
+	}
+
+	if port.ControllerNumber != nil {
+		fields = append(fields, field{key: "controller_number", value: strconv.Itoa(int(*port.ControllerNumber))})
+	}
+
+	if port.External != nil {
+		fields = append(fields, field{key: "external", value: strconv.FormatBool(*port.External)})
+	}
+
+	fieldsStr := []string{}
+	for _, field := range fields {
+		fieldsStr = append(fieldsStr, fmt.Sprintf("%s=%s", field.key, field.value))
+	}
+
+	t.Log(strings.Join(fieldsStr, " "))
+}
+
+func TestDevLinkGetAllPortList(t *testing.T) {
+	minKernelRequired(t, 5, 4)
+	ports, err := DevLinkGetAllPortList()
+	assert.NoError(t, err)
+
+	t.Log("devlink port count = ", len(ports))
+	for _, port := range ports {
+		logPort(t, port)
+	}
+}
+
+func TestDevLinkAddDelSfPort(t *testing.T) {
+	var addAttrs DevLinkPortAddAttrs
+	minKernelRequired(t, 5, 13)
+	if bus == "" || device == "" {
+		t.Log("devlink bus and device are empty, skipping test")
+		return
+	}
+
+	dev, err := DevLinkGetDeviceByName(bus, device)
+	assert.NoError(t, err)
+
+	addAttrs.SfNumberValid = true
+	addAttrs.SfNumber = uint32(sfnum)
+	addAttrs.PfNumber = 0
+	port, err := DevLinkPortAdd(dev.BusName, dev.DeviceName, 7, addAttrs)
+	assert.NoError(t, err)
+
+	t.Log(*port)
+	if port.Fn != nil {
+		t.Log("function attributes = ", *port.Fn)
+	}
+	err = DevLinkPortDel(dev.BusName, dev.DeviceName, port.PortIndex)
+	assert.NoError(t, err)
+}
+
+func TestDevLinkSfPortFnSet(t *testing.T) {
+	var addAttrs DevLinkPortAddAttrs
+	var stateAttr DevlinkPortFnSetAttrs
+
+	minKernelRequired(t, 5, 12)
+	if bus == "" || device == "" {
+		t.Log("devlink bus and device are empty, skipping test")
+		return
+	}
+
+	dev, err := DevLinkGetDeviceByName(bus, device)
+	assert.NoError(t, err)
+
+	addAttrs.SfNumberValid = true
+	addAttrs.SfNumber = uint32(sfnum)
+	addAttrs.PfNumber = 0
+	port, err := DevLinkPortAdd(dev.BusName, dev.DeviceName, 7, addAttrs)
+	assert.NoError(t, err)
+
+	// cleanup
+	defer func() {
+		err := DevLinkPortDel(dev.BusName, dev.DeviceName, port.PortIndex)
+		assert.NoError(t, err)
+	}()
+
+	t.Log(*port)
+	if port.Fn != nil {
+		t.Log("function attributes = ", *port.Fn)
+	}
+	macAttr := DevlinkPortFnSetAttrs{
+		FnAttrs: DevlinkPortFn{
+			HwAddr: net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, 0x55},
+		},
+		HwAddrValid: true,
+	}
+	err = DevlinkPortFnSet(dev.BusName, dev.DeviceName, port.PortIndex, macAttr)
+	assert.NoError(t, err, "failed to call DevlinkPortFnSet to set mac attribute")
+
+	stateAttr.FnAttrs.State = 1
+	stateAttr.StateValid = true
+	err = DevlinkPortFnSet(dev.BusName, dev.DeviceName, port.PortIndex, stateAttr)
+	assert.NoError(t, err, "failed to call DevlinkPortFnSet to set state attribute")
+
+	gotPort, err := DevLinkGetPortByIndex(dev.BusName, dev.DeviceName, port.PortIndex)
+	assert.NoError(t, err, "failed to call DevLinkGetPortByIndex to get port")
+
+	t.Log(*gotPort)
+	if gotPort.Fn != nil {
+		t.Log(*gotPort.Fn)
+	}
+}
+
+var bus string
+var device string
+var sfnum uint
+
+func init() {
+	flag.StringVar(&bus, "bus", "", "devlink device bus name")
+	flag.StringVar(&device, "device", "", "devlink device devicename")
+	flag.UintVar(&sfnum, "sfnum", 0, "devlink port sfnumber")
+}
+
+func TestDevlinkGetDeviceInfoByNameAsMap(t *testing.T) {
+	info, err := pkgHandle.DevlinkGetDeviceInfoByNameAsMap("pci", "0000:00:00.0", mockDevlinkInfoGetter)
+	assert.NoError(t, err)
+
+	testInfo := devlinkTestInfoParesd()
+	for k, v := range info {
+		assert.Equal(t, testInfo[k], v, "value %s retrieved for key %s is not equal to %s", v, k, testInfo[k])
+	}
+}
+
+func TestDevlinkGetDeviceInfoByName(t *testing.T) {
+	info, err := pkgHandle.DevlinkGetDeviceInfoByName("pci", "0000:00:00.0", mockDevlinkInfoGetter)
+	assert.NoError(t, err)
+
+	testInfo := parseInfoData(devlinkTestInfoParesd())
+	assert.True(t, areInfoStructsEqual(info, testInfo), "info structures are not equal")
+}
+
+func TestDevlinkGetDeviceInfoByNameAsMapFail(t *testing.T) {
+	_, err := pkgHandle.DevlinkGetDeviceInfoByNameAsMap("pci", "0000:00:00.0", mockDevlinkInfoGetterEmpty)
+	assert.Error(t, err)
+}
+
+func TestDevlinkGetDeviceInfoByNameFail(t *testing.T) {
+	_, err := pkgHandle.DevlinkGetDeviceInfoByName("pci", "0000:00:00.0", mockDevlinkInfoGetterEmpty)
+	assert.Error(t, err)
+}
+
+func mockDevlinkInfoGetter(bus, device string) ([]byte, error) {
+	return devlinkInfo(), nil
+}
+
+func mockDevlinkInfoGetterEmpty(bus, device string) ([]byte, error) {
+	return []byte{}, nil
+}
+
+func devlinkInfo() []byte {
+	return []byte{51, 1, 0, 0, 8, 0, 1, 0, 112, 99, 105, 0, 17, 0, 2, 0, 48,
+		48, 48, 48, 58, 56, 52, 58, 48, 48, 46, 48, 0, 0, 0, 0, 8, 0, 98, 0,
+		105, 99, 101, 0, 28, 0, 99, 0, 51, 48, 45, 56, 57, 45, 97, 51, 45,
+		102, 102, 45, 102, 102, 45, 99, 97, 45, 48, 53, 45, 54, 56, 0, 36,
+		0, 100, 0, 13, 0, 103, 0, 98, 111, 97, 114, 100, 46, 105, 100, 0, 0,
+		0, 0, 15, 0, 104, 0, 75, 56, 53, 53, 56, 53, 45, 48, 48, 48, 0, 0,
+		28, 0, 101, 0, 12, 0, 103, 0, 102, 119, 46, 109, 103, 109, 116, 0,
+		10, 0, 104, 0, 53, 46, 52, 46, 53, 0, 0, 0, 28, 0, 101, 0, 16, 0,
+		103, 0, 102, 119, 46, 109, 103, 109, 116, 46, 97, 112, 105, 0, 8, 0,
+		104, 0, 49, 46, 55, 0, 40, 0, 101, 0, 18, 0, 103, 0, 102, 119, 46,
+		109, 103, 109, 116, 46, 98, 117, 105, 108, 100, 0, 0, 0, 15, 0, 104,
+		0, 48, 120, 51, 57, 49, 102, 55, 54, 52, 48, 0, 0, 32, 0, 101, 0,
+		12, 0, 103, 0, 102, 119, 46, 117, 110, 100, 105, 0, 13, 0, 104, 0,
+		49, 46, 50, 56, 57, 56, 46, 48, 0, 0, 0, 0, 32, 0, 101, 0, 16, 0,
+		103, 0, 102, 119, 46, 112, 115, 105, 100, 46, 97, 112, 105, 0, 9, 0,
+		104, 0, 50, 46, 52, 50, 0, 0, 0, 0, 40, 0, 101, 0, 17, 0, 103, 0,
+		102, 119, 46, 98, 117, 110, 100, 108, 101, 95, 105, 100, 0, 0, 0, 0,
+		15, 0, 104, 0, 48, 120, 56, 48, 48, 48, 55, 48, 54, 98, 0, 0, 48, 0,
+		101, 0, 16, 0, 103, 0, 102, 119, 46, 97, 112, 112, 46, 110, 97, 109,
+		101, 0, 27, 0, 104, 0, 73, 67, 69, 32, 79, 83, 32, 68, 101, 102, 97,
+		117, 108, 116, 32, 80, 97, 99, 107, 97, 103, 101, 0, 0, 32, 0, 101,
+		0, 11, 0, 103, 0, 102, 119, 46, 97, 112, 112, 0, 0, 13, 0, 104, 0,
+		49, 46, 51, 46, 50, 52, 46, 48, 0, 0, 0, 0, 44, 0, 101, 0, 21, 0,
+		103, 0, 102, 119, 46, 97, 112, 112, 46, 98, 117, 110, 100, 108,
+		101, 95, 105, 100, 0, 0, 0, 0, 15, 0, 104, 0, 48, 120, 99, 48, 48,
+		48, 48, 48, 48, 49, 0, 0, 44, 0, 101, 0, 15, 0, 103, 0, 102, 119,
+		46, 110, 101, 116, 108, 105, 115, 116, 0, 0, 21, 0, 104, 0, 50, 46,
+		52, 48, 46, 50, 48, 48, 48, 45, 51, 46, 49, 54, 46, 48, 0, 0, 0, 0,
+		44, 0, 101, 0, 21, 0, 103, 0, 102, 119, 46, 110, 101, 116, 108, 105,
+		115, 116, 46, 98, 117, 105, 108, 100, 0, 0, 0, 0, 15, 0, 104, 0, 48,
+		120, 54, 55, 54, 97, 52, 56, 57, 100, 0, 0}
+}
+
+func devlinkTestInfoParesd() map[string]string {
+	return map[string]string{
+		"board.id":         "K85585-000",
+		"fw.app":           "1.3.24.0",
+		"fw.app.bundle_id": "0xc0000001",
+		"fw.app.name":      "ICE OS Default Package",
+		"fw.bundle_id":     "0x8000706b",
+		"fw.mgmt":          "5.4.5",
+		"fw.mgmt.api":      "1.7",
+		"fw.mgmt.build":    "0x391f7640",
+		"fw.netlist":       "2.40.2000-3.16.0",
+		"fw.netlist.build": "0x676a489d",
+		"fw.psid.api":      "2.42",
+		"fw.undi":          "1.2898.0",
+		"driver":           "ice",
+		"serialNumber":     "30-89-a3-ff-ff-ca-05-68",
+	}
+}
+
+func areInfoStructsEqual(first *DevlinkDeviceInfo, second *DevlinkDeviceInfo) bool {
+	if first.FwApp != second.FwApp || first.FwAppBoundleID != second.FwAppBoundleID ||
+		first.FwAppName != second.FwAppName || first.FwBoundleID != second.FwBoundleID ||
+		first.FwMgmt != second.FwMgmt || first.FwMgmtAPI != second.FwMgmtAPI ||
+		first.FwMgmtBuild != second.FwMgmtBuild || first.FwNetlist != second.FwNetlist ||
+		first.FwNetlistBuild != second.FwNetlistBuild || first.FwPsidAPI != second.FwPsidAPI ||
+		first.BoardID != second.BoardID || first.FwUndi != second.FwUndi ||
+		first.Driver != second.Driver || first.SerialNumber != second.SerialNumber {
+		return false
+	}
+	return true
+}
+
+func TestDevlinkGetDeviceResources(t *testing.T) {
+	minKernelRequired(t, 5, 11)
+	t.Cleanup(setUpNetlinkTestWithKModule(t, "devlink"))
+
+	if bus == "" || device == "" {
+		//TODO: setup netdevsim device instead of getting device from flags
+		t.Log("devlink bus and device are empty, skipping test")
+		t.SkipNow()
+	}
+
+	res, err := DevlinkGetDeviceResources(bus, device)
+	assert.NoError(t, err, "failed to get device(%s/%s) resources", bus, device)
+	assert.Equal(t, bus, res.Bus, "mismatching bus")
+	assert.Equal(t, device, res.Device, "mismatching device")
+
+	t.Logf("Resources: %+v", res)
+}
+
+// devlink device parameters can be tested with netdevsim
+// function will create netdevsim/netdevsim<random_id> virtual device that can be used for testing
+// netdevsim module should be loaded to run devlink param tests
+func setupDevlinkDeviceParamTest(t *testing.T) (string, string, func()) {
+	t.Helper()
+	skipUnlessRoot(t)
+	skipUnlessKModuleLoaded(t, "netdevsim")
+	testDevID := strconv.Itoa(1000 + rand.Intn(1000))
+	err := os.WriteFile("/sys/bus/netdevsim/new_device", []byte(testDevID), 0755)
+	assert.NoError(t, err, "can't create netdevsim test device %s", testDevID)
+
+	return "netdevsim", "netdevsim" + testDevID, func() {
+		_ = os.WriteFile("/sys/bus/netdevsim/del_device", []byte(testDevID), 0755)
+	}
+}
+
+func TestDevlinkGetDeviceParams(t *testing.T) {
+	busName, deviceName, cleanupFunc := setupDevlinkDeviceParamTest(t)
+	defer cleanupFunc()
+	params, err := DevlinkGetDeviceParams(busName, deviceName)
+	assert.NoError(t, err, "failed to get device(%s/%s) parameters", busName, deviceName)
+	assert.NotEmpty(t, params, "parameters list is empty")
+
+	for _, p := range params {
+		validateDeviceParams(t, p)
+	}
+}
+
+func TestDevlinkGetDeviceParamByName(t *testing.T) {
+	busName, deviceName, cleanupFunc := setupDevlinkDeviceParamTest(t)
+	defer cleanupFunc()
+	param, err := DevlinkGetDeviceParamByName(busName, deviceName, "max_macs")
+	assert.NoError(t, err, "failed to get device(%s/%s) parameter max_macs", busName, deviceName)
+
+	validateDeviceParams(t, param)
+}
+
+func TestDevlinkSetDeviceParam(t *testing.T) {
+	busName, deviceName, cleanupFunc := setupDevlinkDeviceParamTest(t)
+	defer cleanupFunc()
+	err := DevlinkSetDeviceParam(busName, deviceName, "max_macs", nl.DEVLINK_PARAM_CMODE_DRIVERINIT, uint32(8))
+	assert.NoError(t, err, "failed to set max_macs for device(%s/%s)", busName, deviceName)
+
+	param, err := DevlinkGetDeviceParamByName(busName, deviceName, "max_macs")
+	assert.NoError(t, err, "failed to get device(%s/%s) parameter max_macs", busName, deviceName)
+
+	validateDeviceParams(t, param)
+	v, ok := param.Values[0].Data.(uint32)
+	assert.True(t, ok, "unexpected value")
+	assert.Equal(t, v, uint32(8), "value not set")
+}
+
+func validateDeviceParams(t *testing.T, p *DevlinkParam) {
+	if p.Name == "" {
+		t.Fatal("Name field not set")
+	}
+	if p.Name == "max_macs" && !p.IsGeneric {
+		t.Fatal("IsGeneric should be true for generic parameter")
+	}
+	// test1 is a driver-specific parameter in netdevsim device, check should
+	// also path on HW devices
+	if p.Name == "test1" && p.IsGeneric {
+		t.Fatal("IsGeneric should be false for driver-specific parameter")
+	}
+	switch p.Type {
+	case nl.DEVLINK_PARAM_TYPE_U8,
+		nl.DEVLINK_PARAM_TYPE_U16,
+		nl.DEVLINK_PARAM_TYPE_U32,
+		nl.DEVLINK_PARAM_TYPE_STRING,
+		nl.DEVLINK_PARAM_TYPE_BOOL:
+	default:
+		t.Fatal("Type has unexpected value")
+	}
+	if len(p.Values) == 0 {
+		t.Fatal("Values are not set")
+	}
+	for _, v := range p.Values {
+		switch v.CMODE {
+		case nl.DEVLINK_PARAM_CMODE_RUNTIME,
+			nl.DEVLINK_PARAM_CMODE_DRIVERINIT,
+			nl.DEVLINK_PARAM_CMODE_PERMANENT:
+		default:
+			t.Fatal("CMODE has unexpected value")
+		}
+		if p.Name == "max_macs" {
+			_, ok := v.Data.(uint32)
+			if !ok {
+				t.Fatalf("value max_macs has wrong type: %T, expected: uint32", v.Data)
+			}
+		}
+		if p.Name == "test1" {
+			_, ok := v.Data.(bool)
+			if !ok {
+				t.Fatalf("value test1 has wrong type: %T, expected: bool", v.Data)
+			}
+		}
+	}
+}
+
+func testGetDevlinkPortCommonAttrs() []*nl.RtAttr {
+	nlAttrs := []*nl.RtAttr{}
+	nlAttrs = append(nlAttrs,
+		nl.NewRtAttr(nl.DEVLINK_ATTR_BUS_NAME, nl.ZeroTerminated("pci")),
+		nl.NewRtAttr(nl.DEVLINK_ATTR_DEV_NAME, nl.ZeroTerminated("0000:08:00.0")),
+		nl.NewRtAttr(nl.DEVLINK_ATTR_PORT_INDEX, nl.Uint32Attr(131071)),
+		nl.NewRtAttr(nl.DEVLINK_ATTR_PORT_TYPE, nl.Uint16Attr(nl.DEVLINK_PORT_TYPE_ETH)),
+		nl.NewRtAttr(nl.DEVLINK_ATTR_PORT_NETDEV_NAME, nl.ZeroTerminated("eth0")),
+		nl.NewRtAttr(nl.DEVLINK_ATTR_PORT_NETDEV_IFINDEX, nl.Uint32Attr(5)),
+		nl.NewRtAttr(nl.DEVLINK_ATTR_PORT_IBDEV_NAME, nl.ZeroTerminated("rdma0")),
+	)
+
+	return nlAttrs
+}
+
+func testAddDevlinkPortPhysicalAttrs(nlAttrs []*nl.RtAttr) []*nl.RtAttr {
+	nlAttrs = append(nlAttrs,
+		nl.NewRtAttr(nl.DEVLINK_ATTR_PORT_FLAVOUR, nl.Uint16Attr(nl.DEVLINK_PORT_FLAVOUR_PHYSICAL)),
+		nl.NewRtAttr(nl.DEVLINK_ATTR_PORT_NUMBER, nl.Uint32Attr(1)),
+	)
+
+	return nlAttrs
+}
+
+func testAddDevlinkPortPfAttrs(nlAttrs []*nl.RtAttr) []*nl.RtAttr {
+	nlAttrs = append(nlAttrs,
+		nl.NewRtAttr(nl.DEVLINK_ATTR_PORT_FLAVOUR, nl.Uint16Attr(nl.DEVLINK_PORT_FLAVOUR_PCI_PF)),
+		nl.NewRtAttr(nl.DEVLINK_ATTR_PORT_PCI_PF_NUMBER, nl.Uint16Attr(1)),
+	)
+
+	return nlAttrs
+}
+
+func testAddDevlinkPortVfAttrs(nlAttrs []*nl.RtAttr) []*nl.RtAttr {
+	nlAttrs = append(nlAttrs,
+		nl.NewRtAttr(nl.DEVLINK_ATTR_PORT_FLAVOUR, nl.Uint16Attr(nl.DEVLINK_PORT_FLAVOUR_PCI_VF)),
+		nl.NewRtAttr(nl.DEVLINK_ATTR_PORT_PCI_PF_NUMBER, nl.Uint16Attr(0)),
+		nl.NewRtAttr(nl.DEVLINK_ATTR_PORT_PCI_VF_NUMBER, nl.Uint16Attr(4)),
+	)
+
+	nlAttrs = testAddDevlinkPortFnAttrs(nlAttrs)
+	return nlAttrs
+}
+
+func testAddDevlinkPortSfAttrs(nlAttrs []*nl.RtAttr) []*nl.RtAttr {
+	nlAttrs = append(nlAttrs,
+		nl.NewRtAttr(nl.DEVLINK_ATTR_PORT_FLAVOUR, nl.Uint16Attr(nl.DEVLINK_PORT_FLAVOUR_PCI_SF)),
+		nl.NewRtAttr(nl.DEVLINK_ATTR_PORT_PCI_PF_NUMBER, nl.Uint16Attr(0)),
+		nl.NewRtAttr(nl.DEVLINK_ATTR_PORT_PCI_SF_NUMBER, nl.Uint32Attr(123)),
+	)
+
+	nlAttrs = testAddDevlinkPortFnAttrs(nlAttrs)
+	return nlAttrs
+}
+
+func testNlAttrsToNetlinkRouteAttrs(nlAttrs []*nl.RtAttr) []syscall.NetlinkRouteAttr {
+	attrs := []syscall.NetlinkRouteAttr{}
+	for _, attr := range nlAttrs {
+		attrs = append(attrs, syscall.NetlinkRouteAttr{Attr: syscall.RtAttr(attr.RtAttr), Value: attr.Data})
+	}
+	return attrs
+}
+
+func testAddDevlinkPortFnAttrs(nlAttrs []*nl.RtAttr) []*nl.RtAttr {
+	hwAddr, _ := net.ParseMAC("00:11:22:33:44:55")
+	hwAddrAttr := nl.NewRtAttr(nl.DEVLINK_PORT_FUNCTION_ATTR_HW_ADDR, []byte(hwAddr))
+	raw := hwAddrAttr.Serialize()
+
+	nlAttr := nl.NewRtAttr(nl.DEVLINK_ATTR_PORT_FUNCTION, raw)
+	return append(nlAttrs, nlAttr)
+}
+
+func testAddDevlinkPortControllerAttrs(nlAttrs []*nl.RtAttr, controllerNumber uint32, external bool) []*nl.RtAttr {
+	extVal := uint8(0)
+	if external {
+		extVal = 1
+	}
+
+	nlAttrs = append(nlAttrs,
+		nl.NewRtAttr(nl.DEVLINK_ATTR_PORT_CONTROLLER_NUMBER, nl.Uint32Attr(controllerNumber)),
+		nl.NewRtAttr(nl.DEVLINK_ATTR_PORT_EXTERNAL, nl.Uint8Attr(extVal)),
+	)
+
+	return nlAttrs
+}
+func testAssertCommonAttrs(t *testing.T, port *DevlinkPort) {
+	assert.Equal(t, "pci", port.BusName)
+	assert.Equal(t, "0000:08:00.0", port.DeviceName)
+	assert.Equal(t, uint32(131071), port.PortIndex)
+	assert.Equal(t, uint16(nl.DEVLINK_PORT_TYPE_ETH), port.PortType)
+	assert.Equal(t, "eth0", port.NetdeviceName)
+	assert.Equal(t, uint32(5), port.NetdevIfIndex)
+	assert.Equal(t, "rdma0", port.RdmaDeviceName)
+}
+
+func TestDevlinkPortParseAttributes(t *testing.T) {
+	t.Run("flavor physical", func(t *testing.T) {
+		nlAttrs := testGetDevlinkPortCommonAttrs()
+		nlAttrs = testAddDevlinkPortPhysicalAttrs(nlAttrs)
+		attrs := testNlAttrsToNetlinkRouteAttrs(nlAttrs)
+
+		port := &DevlinkPort{}
+		err := port.parseAttributes(attrs)
+		assert.NoError(t, err)
+
+		testAssertCommonAttrs(t, port)
+		assert.Equal(t, uint16(nl.DEVLINK_PORT_FLAVOUR_PHYSICAL), port.PortFlavour)
+		assert.Equal(t, uint32(1), *port.PortNumber)
+
+		assert.Nil(t, port.Fn)
+		assert.Nil(t, port.PfNumber)
+		assert.Nil(t, port.VfNumber)
+		assert.Nil(t, port.SfNumber)
+		assert.Nil(t, port.ControllerNumber)
+		assert.Nil(t, port.External)
+	})
+
+	t.Run("flavor pcipf", func(t *testing.T) {
+		nlAttrs := testGetDevlinkPortCommonAttrs()
+		nlAttrs = testAddDevlinkPortPfAttrs(nlAttrs)
+		attrs := testNlAttrsToNetlinkRouteAttrs(nlAttrs)
+
+		port := &DevlinkPort{}
+		err := port.parseAttributes(attrs)
+		assert.NoError(t, err)
+
+		testAssertCommonAttrs(t, port)
+		assert.Equal(t, uint16(nl.DEVLINK_PORT_FLAVOUR_PCI_PF), port.PortFlavour)
+		assert.Equal(t, uint16(1), *port.PfNumber)
+
+		assert.Nil(t, port.Fn)
+		assert.Nil(t, port.PortNumber)
+		assert.Nil(t, port.VfNumber)
+		assert.Nil(t, port.SfNumber)
+		assert.Nil(t, port.ControllerNumber)
+		assert.Nil(t, port.External)
+	})
+	t.Run("flavor pcivf", func(t *testing.T) {
+		nlAttrs := testGetDevlinkPortCommonAttrs()
+		nlAttrs = testAddDevlinkPortVfAttrs(nlAttrs)
+		attrs := testNlAttrsToNetlinkRouteAttrs(nlAttrs)
+
+		port := &DevlinkPort{}
+		err := port.parseAttributes(attrs)
+		assert.NoError(t, err)
+
+		testAssertCommonAttrs(t, port)
+		assert.Equal(t, uint16(nl.DEVLINK_PORT_FLAVOUR_PCI_VF), port.PortFlavour)
+		assert.Equal(t, uint16(0), *port.PfNumber)
+		assert.Equal(t, uint16(4), *port.VfNumber)
+		assert.Equal(t, "00:11:22:33:44:55", port.Fn.HwAddr.String())
+
+		assert.Nil(t, port.PortNumber)
+		assert.Nil(t, port.SfNumber)
+		assert.Nil(t, port.ControllerNumber)
+		assert.Nil(t, port.External)
+	})
+
+	t.Run("flavor pcisf", func(t *testing.T) {
+		nlAttrs := testGetDevlinkPortCommonAttrs()
+		nlAttrs = testAddDevlinkPortSfAttrs(nlAttrs)
+		attrs := testNlAttrsToNetlinkRouteAttrs(nlAttrs)
+
+		port := &DevlinkPort{}
+		err := port.parseAttributes(attrs)
+		assert.NoError(t, err)
+
+		testAssertCommonAttrs(t, port)
+		assert.Equal(t, uint16(nl.DEVLINK_PORT_FLAVOUR_PCI_SF), port.PortFlavour)
+		assert.Equal(t, uint16(0), *port.PfNumber)
+		assert.Equal(t, uint32(123), *port.SfNumber)
+		assert.Equal(t, "00:11:22:33:44:55", port.Fn.HwAddr.String())
+
+		assert.Nil(t, port.PortNumber)
+		assert.Nil(t, port.VfNumber)
+		assert.Nil(t, port.ControllerNumber)
+		assert.Nil(t, port.External)
+	})
+
+	t.Run("port with controller - external false", func(t *testing.T) {
+		nlAttrs := testGetDevlinkPortCommonAttrs()
+		nlAttrs = testAddDevlinkPortVfAttrs(nlAttrs)
+		nlAttrs = testAddDevlinkPortControllerAttrs(nlAttrs, 0, false)
+		attrs := testNlAttrsToNetlinkRouteAttrs(nlAttrs)
+
+		port := &DevlinkPort{}
+		err := port.parseAttributes(attrs)
+		assert.NoError(t, err)
+
+		assert.Equal(t, uint32(0), *port.ControllerNumber)
+		assert.Equal(t, false, *port.External)
+	})
+
+	t.Run("port with controller - external true", func(t *testing.T) {
+		nlAttrs := testGetDevlinkPortCommonAttrs()
+		nlAttrs = testAddDevlinkPortVfAttrs(nlAttrs)
+		nlAttrs = testAddDevlinkPortControllerAttrs(nlAttrs, 1, true)
+		attrs := testNlAttrsToNetlinkRouteAttrs(nlAttrs)
+
+		port := &DevlinkPort{}
+		err := port.parseAttributes(attrs)
+		assert.NoError(t, err)
+
+		assert.Equal(t, uint32(1), *port.ControllerNumber)
+		assert.Equal(t, true, *port.External)
+	})
+}

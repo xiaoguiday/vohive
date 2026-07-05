@@ -1,0 +1,44 @@
+name: Main
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: 1.23
+
+    - name: Kernel Modules
+      run: ./.github/scripts/modprobe.sh
+      shell: bash
+
+    - name: Test
+      run: sudo -E env PATH=$PATH go test -v ./ ./nl
+
+  build-macos:
+    # netlink is Linux-only, but this ensures that netlink builds without error
+    # on macOS, which helps catch missing build tags.
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: 1.23
+
+    - name: Build
+      run: go build ./...
+
+    - name: Test
+      run: go test ./...

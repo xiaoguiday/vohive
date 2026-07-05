@@ -1,0 +1,28 @@
+package manager
+
+import (
+	"encoding/hex"
+	"testing"
+)
+
+const fixedSlotPaddedRawPDU = "0791448720003023400ED0E7B4D97C0E9BCD000062500221230140A00500036A0402CAA0B49B5E96BBCB741DE81C369B5DECFC8B2E0FDBCBEC3099FC76CF158A6198CD9E83C6EF391D1488B960AF76DA5DA79741F437A81D5E9741613719242F8FCB697BD905A296F1F439282C2F8366303888FE06CDCB6E32485CA783CCF27219447F83E4E571396D2FBB40C4303D0C4ACF416374587E2E9341613A480683BF9A429742617CCB41000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+func TestTrimDeliverTPDUToDeclaredLengthRemovesFixedSlotPadding(t *testing.T) {
+	raw, err := hex.DecodeString(fixedSlotPaddedRawPDU)
+	if err != nil {
+		t.Fatal(err)
+	}
+	smscLen := int(raw[0])
+	tpduBytes := raw[1+smscLen:]
+
+	got, trimmed := trimDeliverTPDUToDeclaredLength(tpduBytes)
+	if !trimmed {
+		t.Fatal("trimDeliverTPDUToDeclaredLength trimmed=false, want true")
+	}
+	if len(got) != 160 {
+		t.Fatalf("len(trimmed TPDU)=%d want 160", len(got))
+	}
+	if got[len(got)-1] != 0x41 {
+		t.Fatalf("last byte=0x%02X want 0x41", got[len(got)-1])
+	}
+}
