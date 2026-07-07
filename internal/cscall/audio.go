@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,43 @@ import (
 
 	"github.com/iniwex5/vohive/pkg/logger"
 )
+
+// alsaBinCache 缓存 arecord/aplay 的绝对路径。
+// 后台守护进程启动时继承的 $PATH 常常被裁剪（缺失 alsa-utils 目录），
+// 用裸命令名调用会在子进程 Start() 时因找不到可执行文件而报错
+// ("executable file not found in $PATH")。因此启动时探测一次绝对路径并复用。
+var alsaBinCache = struct {
+	sync.Mutex
+	arecord string
+	aplay   string
+	ok      bool
+}{}
+
+// resolveAlsaBin 定位 alsa 工具绝对路径。
+// 先尝试 exec.LookPath（依赖当前 PATH），失败再回退到一组标准绝对路径。
+func resolveAlsaBin(name string) (string, error) {
+	if p, err := exec.LookPath(name); err == nil && p != "" {
+		return p, nil
+	}
+	candidates := []string{
+		"/usr/bin/" + name,
+		"/bin/" + name,
+		"/usr/local/bin/" + name,
+		"/sbin/" + name,
+		"/usr/sbin/" + name,
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c, nil
+		}
+	}
+	return "", fmt.Errorf("%s 未找到：请确认已安装 alsa-utils (如 apt-get install alsa-utils)，且二进制位于 /usr/bin 等标准路径", name)
+}
+
+// alsaEnv 给 alsa 子进程一个完整 PATH，避免其自身再拉起辅助进程时找不到依赖。
+func alsaEnv() []string {
+	return []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+}
 
 // AudioBridge PCM ↔ RTP 音频桥接器
 // 通过 arecord/aplay 管道操作 ALSA 声卡，与 RTP 双向桥接
@@ -79,9 +117,33 @@ func (ab *AudioBridge) SetPCMReady(ready bool) {
 
 // Start 启动双向桥接
 func (ab *AudioBridge) Start() error {
+	// 解析 alsa 工具绝对路径（后台守护进程 PATH 常被裁剪，必须用绝对路径调用）
+	alsaBinCache.Lock()
+	if !alsaBinCache.ok {
+		ar, errAR := resolveAlsaBin("arecord")
+		ap, errAP := resolveAlsaBin("aplay")
+		if errAR == nil && errAP == nil {
+			alsaBinCache.arecord = ar
+			alsaBinCache.aplay = ap
+			alsaBinCache.ok = true
+		}
+	}
+	arecordPath, aplayPath := alsaBinCache.arecord, alsaBinCache.aplay
+	alsaBinCache.Unlock()
+
+	if arecordPath == "" || aplayPath == "" {
+		// 单独再探测一次以便给出精确报错
+		if _, e := resolveAlsaBin("arecord"); e != nil {
+			return fmt.Errorf("启动音频桥失败: %w", e)
+		}
+		return fmt.Errorf("启动音频桥失败: %w", fmt.Errorf("aplay 未找到：请确认已安装 alsa-utils"))
+	}
+	logger.Info(fmt.Sprintf("[%s] AudioBridge: 使用 alsa 工具 arecord=%s aplay=%s",
+		ab.deviceID, arecordPath, aplayPath))
+
 	// 启动 ALSA 采集 (下行: EC20 → Linphone)
 	// 每 40ms 输出 640 字节 (320 samples × 2B, 8kHz S16_LE mono)
-	ab.captureCmd = exec.Command("arecord",
+	ab.captureCmd = exec.Command(arecordPath,
 		"-D", ab.alsaDev,
 		"-f", "S16_LE",
 		"-r", "8000",
@@ -90,6 +152,7 @@ func (ab *AudioBridge) Start() error {
 		"--buffer-size", "640",
 		"--period-size", "320",
 	)
+	ab.captureCmd.Env = alsaEnv()
 
 	var err error
 	ab.captureOut, err = ab.captureCmd.StdoutPipe()
@@ -101,7 +164,7 @@ func (ab *AudioBridge) Start() error {
 	}
 
 	// 启动 ALSA 播放 (上行: Linphone → EC20)
-	ab.playbackCmd = exec.Command("aplay",
+	ab.playbackCmd = exec.Command(aplayPath,
 		"-D", ab.alsaDev,
 		"-f", "S16_LE",
 		"-r", "8000",
@@ -110,6 +173,7 @@ func (ab *AudioBridge) Start() error {
 		"--buffer-size", "1600",
 		"--period-size", "800",
 	)
+	ab.playbackCmd.Env = alsaEnv()
 
 	ab.playbackIn, err = ab.playbackCmd.StdinPipe()
 	if err != nil {
