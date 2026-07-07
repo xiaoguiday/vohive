@@ -459,6 +459,13 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 		p.bindMBIMHealthIndications(w)
 	}
 
+	if p.sipRegistrar != nil {
+		w.CSCallMgr = newCSCallManagerForWorker(w, p.sipRegistrar)
+		if w.CSCallMgr != nil {
+			logger.Info(fmt.Sprintf("[%s] 已启用 CS 域语音桥接 (AudioDev: %s)", w.ID, devCfg.AudioDevice))
+		}
+	}
+
 	if qmiCore != nil {
 		var resetRecoveryRunning atomic.Bool
 		qmiCore.OnModemReset(func() {

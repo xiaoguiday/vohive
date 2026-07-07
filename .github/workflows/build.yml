@@ -1,0 +1,141 @@
+name: Build VoHive
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64]
+        include:
+          - goarch: amd64
+            goarch_full: amd64
+          - goarch: arm64
+            goarch_full: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build Frontend
+        run: |
+          cd web
+          npm ci
+          npm run build
+          cp -r dist ../internal/web/
+
+      - name: Build Backend (${{ matrix.goarch }})
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          GOWORK=off go build -trimpath \
+            -ldflags="-s -w -X main.Version=${{ github.ref_name }}" \
+            -tags "with_utls nomsgpack" \
+            -o "vohive-${{ matrix.goarch }}" \
+            ./cmd/vohive
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vohive-linux-${{ matrix.goarch }}
+          path: vohive-${{ matrix.goarch }}
+
+  build-armv7:
+    name: Build (armv7)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build Frontend
+        run: |
+          cd web
+          npm ci
+          npm run build
+          cp -r dist ../internal/web/
+
+      - name: Build Backend (armv7)
+        env:
+          GOOS: linux
+          GOARCH: arm
+          GOARM: 7
+          CGO_ENABLED: 0
+        run: |
+          GOWORK=off go build -trimpath \
+            -ldflags="-s -w" \
+            -tags "with_utls nomsgpack" \
+            -o "vohive-armv7" \
+            ./cmd/vohive
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vohive-linux-armv7
+          path: vohive-armv7
+
+  release:
+    name: Create Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, build-armv7]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          cd artifacts
+          for d in vohive-linux-*; do
+            arch="${d#vohive-linux-}"
+            mv "$d/vohive-$arch" "vohive-$arch"
+            rmdir "$d"
+          done
+          ls -lh
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/vohive-*
+          draft: false
+          generate_release_notes: true

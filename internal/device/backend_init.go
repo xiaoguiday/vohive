@@ -24,3 +24,13 @@ func backendUsesATRuntime(mode string) bool {
 	return backend.NormalizeBackendMode(mode) == backend.BackendAT
 }
 
+func workerBackendMode(w *Worker) string {
+	if w == nil {
+		return ""
+	}
+	if w.Backend != nil {
+		return w.Backend.Mode()
+	}
+	return resolvedBackendMode(w.Config)
+}
+

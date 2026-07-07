@@ -14,12 +14,14 @@ import (
 	"github.com/iniwex5/vohive/internal/backend"
 	"github.com/iniwex5/vohive/internal/cardpolicy"
 	"github.com/iniwex5/vohive/internal/config"
+	"github.com/iniwex5/vohive/internal/cscall"
 	"github.com/iniwex5/vohive/internal/db"
 	"github.com/iniwex5/vohive/internal/esim"
 	mbimcore "github.com/iniwex5/vohive/internal/mbim"
 	"github.com/iniwex5/vohive/internal/modem"
 	"github.com/iniwex5/vohive/internal/proxy/server"
 	qmicore "github.com/iniwex5/vohive/internal/qmi"
+	"github.com/iniwex5/vohive/internal/sipgw"
 	"github.com/iniwex5/vohive/internal/vowifihost"
 	"github.com/iniwex5/vohive/pkg/logger"
 	"github.com/iniwex5/vohive/pkg/smscodec"
@@ -108,6 +110,7 @@ type Worker struct {
 	Proxy            *server.Server
 	Pool             *Pool
 	EsimMgr          *esim.Manager
+	CSCallMgr        *cscall.Manager
 	stop             chan struct{}
 	stopOnce         sync.Once
 
@@ -178,6 +181,8 @@ type Pool struct {
 	dataConnectHandlers       []func(deviceID string)
 	rescanAndReconnectForTest func() error
 
+	// SIP 注册器 (用于 CS 域语音桥接查路由)
+	sipRegistrar *sipgw.Registrar
 	voiceGateway *voicehost.Gateway
 
 	// VoWiFi host 侧整合（多实例）

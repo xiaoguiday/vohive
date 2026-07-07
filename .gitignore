@@ -1,65 +1,39 @@
-# 构建产物
-/vo-hive
-/mbimprobe
+# 编译产物
+vohive
 *.exe
 *.dll
 *.so
 *.dylib
 
-# 数据和日志目录
-/data/
-/logs/
+# 测试文件
+*.test
+*.out
+coverage.out
+
+# 数据和日志
+data/
+logs/
 *.db
-*.db-journal
-*.log
+*.db-wal
+*.db-shm
 
-# 前端构建产物 (由 npm run build 生成)
-/web/dist/
-/web/node_modules/
-/web-reader/dist/
-/web-reader/node_modules/
-/internal/web/dist/
-/dist/*
-/raspberry-backups/
+# 前端构建产物
+web/dist/
+web/node_modules/
 
-# IDE 和编辑器
+# IDE
 .idea/
 .vscode/
-.agent/
-.shared/
 *.swp
 *.swo
-*~
 
-# 系统文件
+# 操作系统
 .DS_Store
 Thumbs.db
 
-# 配置文件 (包含敏感信息)
-/config/config.yaml
-/config/*.yaml
-!config/config.example.yaml
-
-# 测试覆盖率
-coverage.out
-*.cover
-*.coverprofile
+# 配置（如需示例配置可保留 config/config.example.yaml）
+config/config.yaml
 
 # 临时文件
-*.tmp
-*.temp
-.cache/
-/server
-/reader
-vohive.code-workspace
-PushNotification.pdf
-Quectel_LTE_Standard_UAC_应用指导_V1.0.pdf
-
-# macOS AppleDouble metadata
-**/._*
-.superpowers/*
-.codex
-.worktrees/
-Quectel_EC2xEG2xEG9xEM05_Series_AT_Commands_Manual_V2.2.pdf
-Quectel_EC2xEG2xEG9xEM05_Series_QCFG_AT_Commands_Manual_V1.6.pdf
-410sim自动激活脚本/*
+tmp/
+*.log

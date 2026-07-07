@@ -20,15 +20,30 @@ import (
 	"github.com/iniwex5/vohive/internal/notify"
 	proxyserver "github.com/iniwex5/vohive/internal/proxy/server"
 	"github.com/iniwex5/vohive/internal/proxy/traffic"
+	"github.com/iniwex5/vohive/internal/sipgw"
 	"github.com/iniwex5/vohive/internal/upstreamproxy"
 	"github.com/iniwex5/vowifi-go/runtimehost/carrier"
 	"github.com/iniwex5/vowifi-go/runtimehost/voicehost"
 
 	"github.com/iniwex5/vohive/internal/web"
 	"github.com/iniwex5/vohive/pkg/logger"
+
+	"github.com/emiago/sipgo/sip"
 )
 
 func main() {
+	// 开启 SIP_DEBUG 以排查问题（针对旧系统或备用系统）
+	os.Setenv("SIP_DEBUG", "false")
+
+	sipLogger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+	sip.SetDefaultLogger(sipLogger)
+	sip.SIPDebug = false
+	// 绕过 sipgo 底层硬编码的 UDP MTU 限制（默认 1500），
+	// 防止由于包含 APNs/FCM 推送 Token 的超长 Contact URI 导致 UDP 发送直接报错。
+	// 大包会自动在 IP 层被切片(IP Fragmentation)。
+	sip.UDPMTUSize = 65535
 	// Parse flags
 	var configPath string
 	var backendOnly bool
@@ -133,8 +148,10 @@ func main() {
 	proxyMgr := proxyserver.NewManager()
 	logger.Info("代理实例管理器已初始化")
 
-	// 7. 初始化语音网关
+	// 7. 初始化语音网关与软电话 Registrar
 	// voiceGW 始终创建，用于管理 VoWiFi Agent（SimulateCall 等）。
+	// SIP Registrar（Linphone 软电话接入）仅在 voice_gateway.sip.listen 非空时启用。
+	var sipRegistrar *sipgw.Registrar
 	var notifyMgr *notify.Manager
 	voiceGW := voicehost.NewGateway()
 	pool.SetVoiceGateway(voiceGW)
@@ -143,6 +160,85 @@ func main() {
 		logger.Error("语音网关启动失败", "err", err)
 	} else {
 		logger.Info("语音网关已启动")
+
+		// SIP Registrar（Linphone 软电话）：仅在配置了 sip.listen 时启动
+		if cfg.VoWiFi.VoiceGateway.SIP.Listen != "" {
+			sipgwCfg := sipgw.Config{
+				Enabled: true,
+				SIP: sipgw.SIPConfig{
+					Listen:     cfg.VoWiFi.VoiceGateway.SIP.Listen,
+					Transport:  cfg.VoWiFi.VoiceGateway.SIP.Transport,
+					Realm:      cfg.VoWiFi.VoiceGateway.SIP.Realm,
+					ExternalIP: cfg.VoWiFi.VoiceGateway.SIP.ExternalIP,
+				},
+				Media: sipgw.MediaConfig{
+					RTPPortMin: cfg.VoWiFi.VoiceGateway.Media.RTPPortMin,
+					RTPPortMax: cfg.VoWiFi.VoiceGateway.Media.RTPPortMax,
+					Codecs:     cfg.VoWiFi.VoiceGateway.Media.Codecs,
+				},
+				LinphonePush: sipgw.LinphonePushConfig{
+					LinphoneUser:     cfg.VoWiFi.VoiceGateway.LinphonePush.LinphoneUser,
+					LinphonePassword: cfg.VoWiFi.VoiceGateway.LinphonePush.LinphonePassword,
+				},
+			}
+			for _, u := range cfg.VoWiFi.VoiceGateway.Users {
+				sipgwCfg.Users = append(sipgwCfg.Users, sipgw.UserConfig{
+					Username:    u.Username,
+					Password:    u.Password,
+					DisplayName: u.DisplayName,
+					DeviceID:    u.DeviceID,
+				})
+			}
+			if sipgwCfg.SIP.Transport == "" {
+				sipgwCfg.SIP.Transport = "udp"
+			}
+			if sipgwCfg.SIP.Realm == "" {
+				sipgwCfg.SIP.Realm = "vohive.local"
+			}
+			if sipgwCfg.Media.RTPPortMin == 0 {
+				sipgwCfg.Media.RTPPortMin = 10000
+			}
+			if sipgwCfg.Media.RTPPortMax == 0 {
+				sipgwCfg.Media.RTPPortMax = 20000
+			}
+
+			var err error
+			sipRegistrar, err = sipgw.NewRegistrar(sipgwCfg)
+			if err != nil {
+				logger.Error("Registrar 初始化失败", "err", err)
+			} else {
+				voiceGW.SetClientAdapter(sipRegistrar)
+
+				sipRegistrar.SetOnInvite(voiceGW.HandleClientInvite)
+				sipRegistrar.SetOnCancel(func(deviceID string, req *sip.Request, tx sip.ServerTransaction) {
+					callID := req.CallID().Value()
+					if w := pool.GetWorker(deviceID); w != nil && w.CSCallMgr != nil && w.CSCallMgr.HasCall(callID) {
+						w.CSCallMgr.HandleClientCancel(callID)
+						tx.Respond(sip.NewResponseFromRequest(req, 200, "OK", nil))
+						return
+					}
+					voiceGW.HandleClientCancel(deviceID, req, tx)
+				})
+				sipRegistrar.SetOnPrack(voiceGW.HandleClientPrack)
+				sipRegistrar.SetOnAck(voiceGW.HandleClientAck)
+				sipRegistrar.SetOnBye(func(deviceID string, req *sip.Request, tx sip.ServerTransaction) {
+					callID := req.CallID().Value()
+					if w := pool.GetWorker(deviceID); w != nil && w.CSCallMgr != nil && w.CSCallMgr.HasCall(callID) {
+						w.CSCallMgr.HandleClientBye(callID)
+						return
+					}
+					voiceGW.HandleClientBye(deviceID, req, tx)
+				})
+
+				pool.SetSIPRegistrar(sipRegistrar)
+
+				if err := sipRegistrar.Start(context.Background()); err != nil {
+					logger.Error("Registrar 启动失败", "err", err)
+				} else {
+					logger.Info("软电话 Registrar 已启动", "listen", sipgwCfg.SIP.Listen, "users", len(sipgwCfg.Users))
+				}
+			}
+		}
 
 		// 通知管理器初始化
 		var err error
@@ -253,10 +349,15 @@ func main() {
 			logger.Error("关闭代理实例时出错", "err", err)
 		}
 
-		// 关闭语音网关
+		// 关闭语音网关与软电话 Registrar
 		if voiceGW != nil {
 			if err := voiceGW.Stop(); err != nil {
 				logger.Error("关闭语音网关时出错", "err", err)
+			}
+		}
+		if sipRegistrar != nil {
+			if err := sipRegistrar.Stop(); err != nil {
+				logger.Error("关闭 Registrar 时出错", "err", err)
 			}
 		}
 
