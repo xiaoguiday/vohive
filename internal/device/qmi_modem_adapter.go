@@ -71,7 +71,7 @@ func (a *qmiModemAdapter) TransmitAPDU(channel int, hexAPDU string) (string, err
 }
 
 func (a *qmiModemAdapter) GetISIMIdentity() (identity.Identity, error) {
-	return identity.ReadISIMIdentity(a)
+	return identity.Identity{}, fmt.Errorf("qmi modem adapter: ISIM identity read not implemented")
 }
 
 // ============================================================================
