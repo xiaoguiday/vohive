@@ -134,6 +134,12 @@ func (c *Coordinator) StartWebsheet(ctx context.Context, deviceID string) (websh
 	req.ContentType = websheetReq.ContentType
 	req.Title = websheetReq.Title
 
+	// ATT 的 e911 页面是静态 HTML 页面，只支持 GET 方法；websheet 系统
+	// 只要有 ContentType 就会用 POST form 提交，导致 405。
+	if strings.Contains(req.URL, "att.com/acctmgmt/wireless/e911") {
+		req.ContentType = ""
+	}
+
 	session, err := c.Websheets.Create(ctx, req)
 	if err != nil {
 		return websheet.Info{}, err
